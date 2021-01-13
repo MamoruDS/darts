@@ -1,0 +1,11 @@
+[style]
+allow_split_before_dict_value = true
+based_on_style = yapf
+blank_line_before_nested_class_or_def = false
+column_limit=80
+dedent_closing_brackets = true
+each_dict_entry_on_separate_line = true
+indent_width = 4
+spaces_around_dict_delimiters = false
+spaces_before_comment = 1
+use_tabs = false
