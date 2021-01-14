@@ -1,7 +1,10 @@
 import torch
 import numpy as np
+import torch.autograd
+import torch.optim
 import torch.nn as nn
-from torch.autograd import Variable
+
+from model_search import Network
 
 
 def _concat(xs):
@@ -9,10 +12,13 @@ def _concat(xs):
 
 
 class Architect(object):
-    def __init__(self, model, args):
-        self.network_momentum = args.momentum
-        self.network_weight_decay = args.weight_decay
+    def __init__(self, model: Network, args):
+        self.network_momentum: float = args.momentum
+        self.network_weight_decay: float = args.weight_decay
         self.model = model
+        print(
+            f's:{type(self.model.arch_parameters)}; s():{type(self.model.arch_parameters())}; s()[0]:{type(self.model.arch_parameters()[0])}'
+        )
         self.optimizer = torch.optim.Adam(
             self.model.arch_parameters(),
             lr=args.arch_learning_rate,
@@ -22,7 +28,7 @@ class Architect(object):
 
     def _compute_unrolled_model(self, input, target, eta, network_optimizer):
         loss = self.model._loss(input, target)
-        theta = _concat(self.model.parameters()).data
+        theta: torch.Tensor = _concat(self.model.parameters()).data
         try:
             moment = _concat(
                 network_optimizer.state[v]['momentum_buffer']
@@ -31,10 +37,12 @@ class Architect(object):
         except:
             moment = torch.zeros_like(theta)
         dtheta = _concat(
-            torch.autograd.grad(loss, self.model.parameters())
+            torch.autograd.grad(loss, list(self.model.parameters()))
         ).data + self.network_weight_decay * theta
         unrolled_model = self._construct_model_from_theta(
-            theta.sub(eta, moment + dtheta)
+            torch.sub(
+                input=theta, other=(moment + dtheta), alpha=eta, out=theta
+            )
         )
         return unrolled_model
 
@@ -66,18 +74,20 @@ class Architect(object):
         unrolled_loss = unrolled_model._loss(input_valid, target_valid)
 
         unrolled_loss.backward()
-        dalpha = [v.grad for v in unrolled_model.arch_parameters()]
-        vector = [v.grad.data for v in unrolled_model.parameters()]
+        dalpha: list[torch.Tensor
+                    ] = [v.grad for v in unrolled_model.arch_parameters()]
+        vector: list[torch.Tensor
+                    ] = [v.grad.data for v in unrolled_model.parameters()]
         implicit_grads = self._hessian_vector_product(
             vector, input_train, target_train
         )
 
         for g, ig in zip(dalpha, implicit_grads):
-            g.data.sub_(eta, ig.data)
+            torch.sub(g.data, ig.data, alpha=eta, out=g.data)
 
         for v, g in zip(self.model.arch_parameters(), dalpha):
             if v.grad is None:
-                v.grad = Variable(g.data)
+                v.grad = g.data
             else:
                 v.grad.data.copy_(g.data)
 
@@ -96,19 +106,21 @@ class Architect(object):
         model_new.load_state_dict(model_dict)
         return model_new.cuda()
 
-    def _hessian_vector_product(self, vector, input, target, r=1e-2):
-        R = r / _concat(vector).norm()
+    def _hessian_vector_product(
+        self, vector: list[torch.Tensor], input, target, r=1e-2
+    ):
+        R: torch.Tensor = r / _concat(vector).norm()
         for p, v in zip(self.model.parameters(), vector):
-            p.data.add_(R, v)
+            torch.add(p.data, v, alpha=R.item(), out=p.data) # TBD
         loss = self.model._loss(input, target)
         grads_p = torch.autograd.grad(loss, self.model.arch_parameters())
 
         for p, v in zip(self.model.parameters(), vector):
-            p.data.sub_(2 * R, v)
+            torch.sub(p.data, v, alpha=R.item(), out=p.data) # TBD
         loss = self.model._loss(input, target)
         grads_n = torch.autograd.grad(loss, self.model.arch_parameters())
 
         for p, v in zip(self.model.parameters(), vector):
-            p.data.add_(R, v)
+            torch.add(p.data, v, alpha=R.item(), out=p.data) # TBD
 
         return [(x - y).div_(2 * R) for x, y in zip(grads_p, grads_n)]

@@ -62,7 +62,7 @@ class Cell(nn.Module):
 
 
 class AuxiliaryHeadCIFAR(nn.Module):
-    def __init__(self, C, num_classes):
+    def __init__(self, C: int, num_classes: int):
         """assuming input size 8x8"""
         super(AuxiliaryHeadCIFAR, self).__init__()
         self.features = nn.Sequential(
@@ -109,7 +109,9 @@ class AuxiliaryHeadImageNet(nn.Module):
 
 
 class NetworkCIFAR(nn.Module):
-    def __init__(self, C, num_classes, layers, auxiliary, genotype):
+    def __init__(
+        self, C: int, num_classes: int, layers: int, auxiliary: bool, genotype
+    ):
         super(NetworkCIFAR, self).__init__()
         self._layers = layers
         self._auxiliary = auxiliary
@@ -124,6 +126,7 @@ class NetworkCIFAR(nn.Module):
         C_prev_prev, C_prev, C_curr = C_curr, C_curr, C
         self.cells = nn.ModuleList()
         reduction_prev = False
+        C_to_auxiliary:int = -1 # TBD (for solving unbound
         for i in range(layers):
             if i in [layers // 3, 2 * layers // 3]:
                 C_curr *= 2
@@ -160,7 +163,9 @@ class NetworkCIFAR(nn.Module):
 
 
 class NetworkImageNet(nn.Module):
-    def __init__(self, C, num_classes, layers, auxiliary, genotype):
+    def __init__(
+        self, C: int, num_classes: int, layers: int, auxiliary: bool, genotype
+    ):
         super(NetworkImageNet, self).__init__()
         self._layers = layers
         self._auxiliary = auxiliary
@@ -185,6 +190,7 @@ class NetworkImageNet(nn.Module):
 
         self.cells = nn.ModuleList()
         reduction_prev = True
+        C_to_auxiliary:int = -1 # TBD (for solving unbound
         for i in range(layers):
             if i in [layers // 3, 2 * layers // 3]:
                 C_curr *= 2
