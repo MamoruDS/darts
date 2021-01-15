@@ -117,3 +117,7 @@ Session.vim
 *~
 # Auto-generated tag files
 tags
+
+
+data/cifar-10*
+pretrained/
