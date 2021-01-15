@@ -7,13 +7,16 @@ import torch
 import utils
 import logging
 import argparse
+import torch.cuda
+import torch.optim
 import torch.nn as nn
-import torch.utils
+import torch.utils.data
 import torch.nn.functional as F
 import torchvision.datasets as dset
 import torch.backends.cudnn as cudnn
 
-from torch.autograd import Variable
+from typing import Any, no_type_check
+
 from model_search import Network
 from architect import Architect
 
@@ -132,14 +135,21 @@ def main():
         weight_decay=args.weight_decay
     )
 
-    train_transform, valid_transform = utils._data_transforms_cifar10(args)
+    train_transform, valid_transform = utils._data_transforms_cifar10(
+        args.cutout, args.cutout_length
+    )
     train_data = dset.CIFAR10(
         root=args.data, train=True, download=True, transform=train_transform
     )
 
     num_train = len(train_data)
     indices = list(range(num_train))
-    split = int(np.floor(args.train_portion * num_train))
+    split = np.floor(args.train_portion * num_train)
+
+    def _conv(input: Any) -> int:
+        return int(input)
+
+    split = _conv(split)
 
     train_queue = torch.utils.data.DataLoader(
         train_data,
@@ -160,18 +170,17 @@ def main():
     )
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, float(args.epochs), eta_min=args.learning_rate_min
+        optimizer, int(args.epochs), eta_min=args.learning_rate_min
     )
 
     architect = Architect(model, args)
 
     for epoch in range(args.epochs):
-        scheduler.step()
-        lr = scheduler.get_lr()[0]
-        logging.info('epoch %d lr %e', epoch, lr)
+        lr = scheduler.get_last_lr()[0]
+        logging.info(f'epoch {epoch} lr {lr}')
 
         genotype = model.genotype()
-        logging.info('genotype = %s', genotype)
+        logging.info(f'genotype = {genotype}')
 
         print(F.softmax(model.alphas_normal, dim=-1))
         print(F.softmax(model.alphas_reduce, dim=-1))
@@ -180,11 +189,13 @@ def main():
         train_acc, train_obj = train(
             train_queue, valid_queue, model, architect, criterion, optimizer, lr
         )
-        logging.info('train_acc %f', train_acc)
+        logging.info(f'train_acc {train_acc}',)
 
         # validation
         valid_acc, valid_obj = infer(valid_queue, model, criterion)
-        logging.info('valid_acc %f', valid_acc)
+        logging.info(f'valid_acc {valid_acc}')
+
+        scheduler.step()
 
         utils.save(model, os.path.join(args.save, 'weights.pt'))
 
@@ -198,15 +209,13 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
         model.train()
         n = input.size(0)
 
-        input = Variable(input, requires_grad=False).cuda()
-        target = Variable(target, requires_grad=False).cuda(async=True)
+        input: torch.Tensor = input.cuda()
+        target: torch.Tensor = target.cuda(non_blocking=True)
 
         # get a random minibatch from the search queue with replacement
         input_search, target_search = next(iter(valid_queue))
-        input_search = Variable(input_search, requires_grad=False).cuda()
-        target_search = Variable(
-            target_search, requires_grad=False
-        ).cuda(async=True)
+        input_search: torch.Tensor = input_search.cuda()
+        target_search: torch.Tensor = target_search.cuda(non_blocking=True)
 
         architect.step(
             input,
@@ -220,16 +229,16 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
 
         optimizer.zero_grad()
         logits = model(input)
-        loss = criterion(logits, target)
+        loss: torch.Tensor = criterion(logits, target)
 
         loss.backward()
-        nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
 
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
 
         if step % args.report_freq == 0:
             logging.info(
@@ -245,23 +254,24 @@ def infer(valid_queue, model, criterion):
     top5 = utils.AvgrageMeter()
     model.eval()
 
-    for step, (input, target) in enumerate(valid_queue):
-        input = Variable(input, volatile=True).cuda()
-        target = Variable(target, volatile=True).cuda(async=True)
+    with torch.no_grad():
+        for step, (input, target) in enumerate(valid_queue):
+            input: torch.Tensor = input.cuda()
+            target: torch.Tensor = target.cuda(non_blocking=True)
 
-        logits = model(input)
-        loss = criterion(logits, target)
+            logits = model(input)
+            loss = criterion(logits, target)
 
-        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        n = input.size(0)
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+            prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+            n = input.size(0)
+            objs.update(loss.item(), n)
+            top1.update(prec1.item(), n)
+            top5.update(prec5.item(), n)
 
-        if step % args.report_freq == 0:
-            logging.info(
-                'valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg
-            )
+            if step % args.report_freq == 0:
+                logging.info(
+                    'valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg
+                )
 
     return top1.avg, objs.avg
 

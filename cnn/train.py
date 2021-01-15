@@ -7,13 +7,14 @@ import torch
 import utils
 import logging
 import argparse
+import torch.cuda
+import torch.optim
 import torch.nn as nn
 import genotypes
-import torch.utils
+import torch.utils.data
 import torchvision.datasets as dset
 import torch.backends.cudnn as cudnn
 
-from torch.autograd import Variable
 from model import NetworkCIFAR as Network
 
 parser = argparse.ArgumentParser("cifar")
@@ -126,7 +127,9 @@ def main():
         weight_decay=args.weight_decay
     )
 
-    train_transform, valid_transform = utils._data_transforms_cifar10(args)
+    train_transform, valid_transform = utils._data_transforms_cifar10(
+        args.cutout, args.cutout_length
+    )
     train_data = dset.CIFAR10(
         root=args.data, train=True, download=True, transform=train_transform
     )
@@ -151,19 +154,20 @@ def main():
     )
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, float(args.epochs)
+        optimizer, int(args.epochs)
     )
 
     for epoch in range(args.epochs):
-        scheduler.step()
-        logging.info('epoch %d lr %e', epoch, scheduler.get_lr()[0])
+        logging.info(f'epoch {epoch} lr {scheduler.get_last_lr()[0]}')
         model.drop_path_prob = args.drop_path_prob * epoch / args.epochs
 
         train_acc, train_obj = train(train_queue, model, criterion, optimizer)
-        logging.info('train_acc %f', train_acc)
+        logging.info(f'train_acc {train_acc}')
 
         valid_acc, valid_obj = infer(valid_queue, model, criterion)
-        logging.info('valid_acc %f', valid_acc)
+        logging.info(f'valid_acc {valid_acc}')
+
+        scheduler.step()
 
         utils.save(model, os.path.join(args.save, 'weights.pt'))
 
@@ -175,24 +179,24 @@ def train(train_queue, model, criterion, optimizer):
     model.train()
 
     for step, (input, target) in enumerate(train_queue):
-        input = Variable(input).cuda()
-        target = Variable(target).cuda(async=True)
+        input: torch.Tensor = input.cuda()
+        target: torch.Tensor = target.cuda(non_blocking=True)
 
         optimizer.zero_grad()
         logits, logits_aux = model(input)
-        loss = criterion(logits, target)
+        loss: torch.Tensor = criterion(logits, target)
         if args.auxiliary:
             loss_aux = criterion(logits_aux, target)
             loss += args.auxiliary_weight * loss_aux
         loss.backward()
-        nn.utils.clip_grad_norm(model.parameters(), args.grad_clip)
+        nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
 
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
         n = input.size(0)
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+        objs.update(loss.item(), n)
+        top1.update(prec1.item(), n)
+        top5.update(prec5.item(), n)
 
         if step % args.report_freq == 0:
             logging.info(
@@ -208,23 +212,24 @@ def infer(valid_queue, model, criterion):
     top5 = utils.AvgrageMeter()
     model.eval()
 
-    for step, (input, target) in enumerate(valid_queue):
-        input = Variable(input, volatile=True).cuda()
-        target = Variable(target, volatile=True).cuda(async=True)
+    with torch.no_grad():
+        for step, (input, target) in enumerate(valid_queue):
+            input: torch.Tensor = input.cuda()
+            target: torch.Tensor = target.cuda(non_blocking=True)
 
-        logits, _ = model(input)
-        loss = criterion(logits, target)
+            logits, _ = model(input)
+            loss: torch.Tensor = criterion(logits, target)
 
-        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        n = input.size(0)
-        objs.update(loss.data[0], n)
-        top1.update(prec1.data[0], n)
-        top5.update(prec5.data[0], n)
+            prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+            n = input.size(0)
+            objs.update(loss.item(), n)
+            top1.update(prec1.item(), n)
+            top5.update(prec5.item(), n)
 
-        if step % args.report_freq == 0:
-            logging.info(
-                'valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg
-            )
+            if step % args.report_freq == 0:
+                logging.info(
+                    'valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg
+                )
 
     return top1.avg, objs.avg
 
